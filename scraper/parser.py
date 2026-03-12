@@ -1,6 +1,61 @@
 from bs4 import BeautifulSoup
 from loguru import logger
 import json
+import re
+import html as html_module
+
+
+def clean_html(text):
+    """Ukloni HTML tagove i očisti tekst"""
+    if not text:
+        return None
+    text = html_module.unescape(text)
+    soup = BeautifulSoup(text, 'lxml')
+    clean = soup.get_text(separator=' ', strip=True)
+    clean = re.sub(r'\s+', ' ', clean)
+    return clean.strip() if clean else None
+
+
+def parse_list_items(html_text):
+    """Parsira <ul><li> liste u dictionary"""
+    if not html_text or '<li>' not in html_text:
+        return None
+    
+    soup = BeautifulSoup(html_text, 'lxml')
+    items = {}
+    
+    for li in soup.find_all('li'):
+        text = li.get_text(strip=True)
+        if ':' in text:
+            key, value = text.split(':', 1)
+            items[key.strip()] = value.strip()
+        else:
+            items[text] = True
+    
+    return items if items else clean_html(html_text)
+
+
+def parse_structured_text(html_text):
+    """Parsira strukturirani tekst sa <strong> naslovima"""
+    if not html_text or '<strong>' not in html_text:
+        return clean_html(html_text)
+    
+    soup = BeautifulSoup(html_text, 'lxml')
+    sections = {}
+    current_section = None
+    
+    for element in soup.descendants:
+        if element.name == 'strong':
+            current_section = element.get_text(strip=True).rstrip(':')
+            sections[current_section] = []
+        elif element.name == 'br' and current_section:
+            continue
+        elif isinstance(element, str) and current_section:
+            text = element.strip()
+            if text and text not in sections[current_section]:
+                sections[current_section].append(text)
+    
+    return {k: ' '.join(v) for k, v in sections.items() if v} or clean_html(html_text)
 
 
 def extract_search_results(html, max_results=None):
@@ -65,8 +120,8 @@ def extract_search_results(html, max_results=None):
 
 def parse_apartment(html, url):
     """
-    Parse apartment data from willhaben.at HTML.
-    Data is stored in Next.js __NEXT_DATA__ script tag.
+    Dinamički parsira apartman podatke iz willhaben.at HTML-a.
+    Koristi originalne njemačke ključeve bez hardkodiranja.
     """
     soup = BeautifulSoup(html, 'lxml')
     
@@ -79,70 +134,89 @@ def parse_apartment(html, url):
         data = json.loads(script_tag.string)
         page_props = data['props']['pageProps']
         
-        # Check if advertDetails exists
         if 'advertDetails' not in page_props:
             logger.error(f"No advertDetails in pageProps for {url}")
-            logger.debug(f"Available keys: {list(page_props.keys())}")
             return None
         
         ad = page_props['advertDetails']
-        attrs = {attr['name']: attr.get('values', []) for attr in ad.get('attributes', {}).get('attribute', [])}
+        apartment = {'url': url}
         
-        def get_attr(name, index=0):
-            values = attrs.get(name, [])
-            return values[index] if values and len(values) > index else None
+        # Osnovni podaci
+        for key in ['id', 'uuid', 'description', 'advertiserReferenceNumber', 
+                    'createdDate', 'changedDate', 'publishedDate']:
+            if key in ad:
+                apartment[key] = ad[key]
         
-        def attr_contains(name, keyword):
-            values = attrs.get(name, [])
-            return any(keyword.lower() in str(v).lower() for v in values)
+        # Adresa
+        address_details = ad.get('advertAddressDetails', {})
+        if address_details:
+            apartment['advertAddressDetails'] = {
+                'postalCode': address_details.get('postalCode'),
+                'postalName': address_details.get('postalName'),
+                'addressLines': address_details.get('addressLines', {}).get('value', [])
+            }
         
-        coords = get_attr('COORDINATES')
-        lat, lon = (coords.split(',') if coords else [None, None])
+        # Dinamički parsiraj SVE atribute
+        for attr in ad.get('attributes', {}).get('attribute', []):
+            name = attr['name']
+            values = attr.get('values', [])
+            value = values[0] if len(values) == 1 else values
+            
+            # GENERAL_TEXT_ADVERT/ sekcije - koristi originalne njemačke nazive
+            if name.startswith('GENERAL_TEXT_ADVERT/'):
+                section_name = name.replace('GENERAL_TEXT_ADVERT/', '')
+                
+                if '<li>' in str(value):
+                    parsed = parse_list_items(value)
+                elif '<strong>' in str(value):
+                    parsed = parse_structured_text(value)
+                else:
+                    parsed = clean_html(value)
+                
+                apartment[section_name] = parsed
+            else:
+                # Svi ostali atributi - direktno sa originalnim nazivom
+                apartment[name] = value
         
-        address_lines = ad.get('advertAddressDetails', {}).get('addressLines', {}).get('value', [])
+        # Izvuci sekcije iz HTML-a (Objektinformationen, Ausstattung und Freiflächen)
+        skip_sections = ['Premium Services', 'Verfügbare Wohneinheiten', 'Über dieses Neubauprojekt']
         
-        apartment_data = {
-            "url": url,
-            "title": ad.get('description', ''),
-            "district": ad.get('advertAddressDetails', {}).get('postalName', ''),
-            "address": ', '.join(address_lines) if address_lines else '',
-            "price_rent": int(get_attr('PRICE') or 0),
-            "extra_costs": get_attr('ADDITIONAL_COST/FEE'),
-            "total_price": int(get_attr('PRICE') or 0),
-            "size_m2": int(float((get_attr('ESTATE_SIZE/LIVING_AREA') or get_attr('ESTATE_SIZE') or '0').replace(',', '.'))),
-            "useable_area": float(get_attr('ESTATE_SIZE/USEABLE_AREA').replace(',', '.')) if get_attr('ESTATE_SIZE/USEABLE_AREA') else None,
-            "rooms": int(get_attr('NO_OF_ROOMS') or 0),
-            "floor": get_attr('FLOOR'),
-            "year_built": get_attr('CONSTRUCTION_YEAR'),
-            "balcony": attr_contains('FREE_AREA/FREE_AREA_TYPE', 'balkon'),
-            "terrace": attr_contains('FREE_AREA/FREE_AREA_TYPE', 'terrasse'),
-            "garage": attr_contains('ESTATE_PREFERENCE', 'garage'),
-            "parking": attr_contains('ESTATE_PREFERENCE', 'parkplatz') or attr_contains('ESTATE_PREFERENCE', 'stellplatz'),
-            "elevator": attr_contains('ESTATE_PREFERENCE', 'fahrstuhl') or attr_contains('ESTATE_PREFERENCE', 'lift'),
-            "furnished": attr_contains('ESTATE_PREFERENCE', 'möbliert'),
-            "pets_allowed": attr_contains('ESTATE_PREFERENCE', 'haustier'),
-            "keller": attr_contains('ESTATE_PREFERENCE', 'keller'),
-            "garden": attr_contains('FREE_AREA/FREE_AREA_TYPE', 'garten'),
-            "loggia": attr_contains('FREE_AREA/FREE_AREA_TYPE', 'loggia'),
-            "latitude": float(lat) if lat else None,
-            "longitude": float(lon) if lon else None,
-            "description": get_attr('DESCRIPTION', 0) or '',
-            "scraped_at": ad.get('changedDate', ''),
-            "building_type": get_attr('BUILDING_TYPE'),
-            "building_condition": get_attr('BUILDING_CONDITION'),
-            "floor_surface": get_attr('FLOOR_SURFACE'),
-            "heating": attrs.get('HEATING', []),
-            "energy_hwb": get_attr('ENERGY_HWB'),
-            "energy_hwb_class": get_attr('ENERGY_HWB_CLASS'),
-            "energy_fgee": get_attr('ENERGY_FGEE'),
-            "energy_fgee_class": get_attr('ENERGY_FGEE_CLASS'),
-            "balcony_size": get_attr('FREE_AREA/FREE_AREA_AREA'),
-            "available": get_attr('AVAILABLE_NOW'),
-            "is_private": get_attr('ISPRIVATE') == '1',
-        }
+        for h2 in soup.find_all('h2'):
+            section_title = h2.get_text(strip=True)
+            
+            if not section_title or len(section_title) > 100 or section_title in skip_sections:
+                continue
+            
+            # Nađi sljedeći div sa atributima
+            next_div = h2.find_next('div', {'data-testid': 'attribute-group'})
+            if next_div:
+                section_data = {}
+                
+                for item in next_div.find_all('li', {'data-testid': 'attribute-item'}):
+                    title_div = item.find('div', {'data-testid': 'attribute-title'})
+                    value_div = item.find('div', {'data-testid': 'attribute-value'})
+                    
+                    if title_div and value_div:
+                        key = title_div.get_text(strip=True)
+                        value = value_div.get_text(strip=True)
+                        
+                        if value_div.find('svg'):
+                            section_data[key] = True
+                        else:
+                            section_data[key] = value
+                
+                if section_data:
+                    apartment[section_title] = section_data
         
-        logger.success(f"Parsed: {apartment_data['title'][:50]}...")
-        return apartment_data
+        # Izvuci Objektbeschreibung iz HTML-a
+        for h2 in soup.find_all('h2'):
+            if 'Objektbeschreibung' in h2.get_text():
+                desc_div = h2.find_next('div', {'data-testid': lambda x: x and 'ad-description' in x})
+                if desc_div:
+                    apartment['Objektbeschreibung'] = clean_html(str(desc_div))
+        
+        logger.success(f"Parsed: {apartment.get('description', 'Unknown')[:50]}...")
+        return apartment
         
     except Exception as e:
         logger.error(f"Error parsing {url}: {e}")
