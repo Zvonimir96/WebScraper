@@ -75,7 +75,7 @@ def open_search_page(page, city, property_type, price_max=None, area_min=None):
         logger.warning(f"Unknown city: {city}, using form method")
         # Fallback to form method
         page.goto("https://www.willhaben.at/iad/immobilien/")
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("domcontentloaded")
         page.wait_for_selector('select#searchid-select', state='visible')
         page.select_option('select#searchid-select', property_type)
         page.fill('input#location-autocomplete-input', city)
@@ -102,7 +102,7 @@ def open_search_page(page, city, property_type, price_max=None, area_min=None):
         
         logger.info(f"Direct URL: {url}")
         page.goto(url)
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("domcontentloaded")
     
     current_url = page.url
     logger.debug(f"Current URL: {current_url}")

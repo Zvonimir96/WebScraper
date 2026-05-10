@@ -31,7 +31,7 @@ def scrape_apartments(urls, headless=True, timeout=30000):
                     time.sleep(delay)
                 
                 logger.info(f"Scraping {i}/{len(urls)}")
-                page.goto(url, wait_until='networkidle')
+                page.goto(url, wait_until='domcontentloaded')
                 
                 # Random delay after page load (1-3 seconds)
                 time.sleep(random.uniform(1, 3))

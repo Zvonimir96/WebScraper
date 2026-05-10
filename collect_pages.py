@@ -1,3 +1,4 @@
+#!/home/zvone/proj/webScraper/venv/bin/python
 """
 Collect all search result page URLs and save to queue.
 Run this periodically (e.g. every hour) to refresh the queue.

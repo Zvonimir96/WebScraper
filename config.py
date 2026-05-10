@@ -1,6 +1,6 @@
 # Browser settings
 HEADLESS = False  # Set to False to see browser (helps avoid detection)
-TIMEOUT = 30000  # milliseconds
+TIMEOUT = 50000  # milliseconds
 
 # Search settings
 SEARCH_CONFIG = {
